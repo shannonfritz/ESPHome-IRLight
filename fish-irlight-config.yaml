@@ -1,0 +1,655 @@
+substitutions:
+  devicename: "Fish IRLight"
+  deviceid: "fish-irlight"
+
+esphome:
+  name: "${deviceid}"
+  on_boot:
+    priority: 500
+    then: # set the LED Sync switch ON by default
+      - switch.turn_on: sync_led
+
+esp8266:
+  board: d1_mini
+
+# Enable logging
+logger:
+
+# Enable Home Assistant API
+api:
+
+ota:
+  password: !secret ota_password
+
+wifi:
+  ssid: !secret wifi_ssid
+  password: !secret wifi_password
+  domain: !secret wifi_domain
+  fast_connect: on
+
+  # Enable fallback hotspot (captive portal) in case wifi connection fails
+  ap:
+    ssid: "${devicename} Fallback Hotspot"
+    password: !secret wifi_fallbackpassword
+
+captive_portal:
+
+# A momentary press button that could be used to toggle the Power switch
+# No resistor is necessary as we'll use the internal pullup setting for that
+# Connect one pin to D1 (GPIO5)
+# Connect the other pin to GND
+binary_sensor:
+  - platform: gpio
+    id: gpiobutton
+    name: "${devicename} Physical Button"
+    pin: # D1 on the D1 mini
+      number: GPIO5
+      inverted: true
+      mode:
+        input: true
+        pullup: true
+    filters:
+      - delayed_on: 10ms
+    on_press:
+      then:
+        - switch.toggle: power_switch
+
+light:
+  - platform: monochromatic
+    id: builtinled
+    name: "${devicename} Built-in LED"
+    output: output_component1
+ 
+output:
+  - platform: esp8266_pwm
+    id: output_component1
+    inverted: true
+    pin: 2
+
+# Controller for the Satellite Freshwater LED+ tank light
+# https://current-usa.com/satellite-freshwater-plus-led/
+
+# The receiver is only needed if you need to capture the IR commands.
+# I used a three-pin VS1838B to 'learn' the buttons for this remote, so it's not
+# necessary now, but it could be used to learn commands from other remotes
+# Connect GND to GND
+# Connect VCC to 3V3
+# Connect OUT to D5 (GPIO14)
+remote_receiver:
+  pin: #D5 on the D1 mini
+    number: GPIO14
+    inverted: True
+    mode: INPUT_PULLUP
+  dump: raw
+  idle: 25ms
+
+# The transmitter LED also requires a three pin NPN Transister like the BC337
+# Connect Collector to GND
+# Connect Base to D2 (GPIO4)
+# Connect Emitter to Cathode (-)
+# Connect Anode (+) to 3V3
+remote_transmitter:
+  pin: #D2 on the D1 mini
+    number: GPIO4
+  carrier_duty_percent: 50%
+
+script:
+  # Send the IR command by pusing the button, which is really a Toggle
+  - id: toggle_power
+    then:
+      - if: # Toggle the Built-in LED if Sync is Enabled
+          condition:
+            switch.is_on: sync_led
+          then:
+            light.toggle: builtinled
+          else:
+            logger.log: "LED Sync is disabled"
+      - button.press: irbtn_onoff
+      - delay: 1s # Wait for a second, just because... 
+
+  # Only send the IR command if we think the Power is OFF
+  # Used by most of the other IR Buttons to make sure the light is ON before
+  # sending the IR command for a Preset (the light doesn't come on otherwise)
+  - id: power_on
+    then:
+      - if:
+          condition:
+            switch.is_off: power_switch
+          then: # Set the Power switch ON which will push the Power button
+            switch.turn_on: power_switch
+          else:
+            logger.log: "Power Switch is already ON"
+
+  # Only send the IR command if we think the Power is ON
+  # This script is not used... just here for completness)
+  - id: power_off
+    then:
+      - if:
+          condition:
+            switch.is_on: power_switch
+          then: # Set the Power switch OFF which will push the Power button
+            switch.turn_off: power_switch
+          else:
+            logger.log: "Power Switch is already OFF"
+
+# Switch that will reflect the expected Power state (on/off)
+# Turnning it On or Off always sends the same IR Command via Script
+# if the Switch gets out of sync with the real light, the Button can be used
+switch:
+  - platform: template
+    id: power_switch
+    name: "${devicename} Power"
+    icon: "mdi:power"
+    optimistic: true
+    on_turn_on:
+    - logger.log: "Power Switched ON"
+    - script.execute: "toggle_power"
+    on_turn_off:
+    - logger.log: "Power Switched OFF"
+    - script.execute: "toggle_power"
+
+# Provides a way to prevent the Power switch from turning the Built-in LED
+# on and off when sending the IR command.  It's not preserved after a restart
+# so, and is turned ON at boot time.  If you want it OFF by default, remove the
+# switch.turn_on in the on_boot section or use an automation in Home Assistant
+  - platform: template
+    id: sync_led
+    name: "${devicename} Sync Built-in LED"
+    icon: "mdi:power-settings"
+    optimistic: true
+    restore_state: true
+    entity_category: config
+
+# Create every button on the 32-key remote control
+button:
+# The Power Button which is a Toggle for the real light.  For automations, the
+# Power Switch should be used to track the state of the light.  This button is
+# used by the switch to toggle the light on/off by sending the same IR command
+  - platform: template
+    id: irbtn_onoff
+    name: "${devicename} Power On/Off"
+    icon: "mdi:gesture-tap-button"
+    on_press:
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8993, -4442, 611, -542, 608, -565, 585, -1640, 610, -542, 608, -541, 609, -565, 585, -541, 608, -542, 608, -1639, 611, -1640, 611, -542, 608, -1642, 609, -1639, 612, -1639, 611, -1640, 610, -1639, 612, -541, 609, -541, 609, -541, 608, -542, 608, -541, 608, -542, 608, -1639, 611, -542, 608, -1640, 611, -1639, 611, -1639, 612, -1640, 611, -1640, 610, -1640, 611, -540, 610, -1639, 611 ]
+
+  - platform: template
+    id: irbtn_playpause
+    name: "${devicename} Play/Pause"
+    icon: "mdi:play-pause"
+    on_press:
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8994, -4443, 611, -541, 609, -541, 609, -1639, 611, -542, 608, -542, 608, -542, 609, -564, 585, -541, 609, -1639, 612, -1640, 611, -541, 609, -1641, 610, -1640, 611, -1639, 612, -1640, 611, -1639, 612, -541, 609, -541, 609, -1640, 611, -541, 609, -540, 610, -540, 609, -1640, 611, -541, 609, -1642, 609, -1640, 611, -541, 609, -1639, 612, -1640, 611, -1639, 613, -539, 610, -1639, 611 ]
+
+# Color Presets
+  - platform: template
+    id: irbtn_orange
+    name: "${devicename} Preset Orange"
+    icon: "mdi:circle"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 9020, -4411, 640, -512, 639, -511, 613, -1634, 640, -512, 638, -512, 638, -511, 638, -512, 638, -511, 614, -1632, 617, -1633, 617, -536, 612, -1635, 615, -1635, 615, -1635, 615, -1634, 615, -1636, 616, -537, 612, -537, 612, -1635, 614, -1637, 586, -1663, 587, -565, 584, -1663, 587, -566, 584, -1663, 587, -1662, 588, -565, 585, -565, 584, -565, 585, -1662, 588, -566, 584, -1663, 587 ]
+
+  - platform: template
+    id: irbtn_teal
+    name: "${devicename} Preset Teal"
+    icon: "mdi:circle"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8993, -4442, 612, -541, 609, -541, 608, -1640, 610, -542, 608, -541, 608, -541, 609, -541, 609, -541, 608, -1639, 612, -1639, 611, -541, 609, -1639, 611, -1639, 612, -1641, 610, -1639, 611, -1640, 611, -1640, 611, -540, 609, -1640, 610, -1641, 610, -1640, 611, -540, 610, -1641, 609, -541, 609, -541, 609, -1639, 611, -540, 610, -540, 610, -540, 610, -1639, 611, -540, 609, -1638, 613 ]
+
+  - platform: template
+    id: irbtn_purple
+    name: "${devicename} Preset Purple"
+    icon: "mdi:circle"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8992, -4443, 611, -542, 607, -566, 584, -1639, 612, -565, 584, -542, 608, -565, 585, -541, 608, -542, 608, -1640, 611, -1639, 611, -541, 609, -1639, 612, -1639, 612, -1639, 611, -1640, 611, -1642, 609, -1638, 613, -541, 610, -540, 609, -540, 609, -541, 609, -541, 609, -1639, 611, -541, 610, -540, 609, -1639, 612, -1638, 612, -1640, 611, -1640, 611, -1641, 610, -541, 609, -1640, 611 ]
+
+  - platform: template
+    id: irbtn_white
+    name: "${devicename} Preset White"
+    icon: "mdi:circle"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8995, -4443, 611, -541, 609, -541, 609, -1638, 613, -540, 609, -541, 609, -541, 609, -540, 609, -541, 609, -1639, 612, -1641, 609, -541, 609, -1640, 611, -1639, 612, -1639, 612, -1639, 612, -1640, 611, -540, 610, -540, 610, -539, 610, -1639, 612, -1640, 611, -541, 609, -1641, 610, -540, 610, -1639, 612, -1640, 611, -1639, 612, -540, 610, -540, 610, -1638, 612, -541, 610, -1639, 611 ]
+
+  - platform: template
+    id: irbtn_yellow
+    name: "${devicename} Preset Yellow"
+    icon: "mdi:circle"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8992, -4441, 613, -541, 609, -540, 610, -1639, 611, -541, 609, -541, 609, -540, 610, -540, 609, -541, 609, -1639, 612, -1637, 613, -541, 609, -1639, 612, -1639, 612, -1639, 611, -1640, 611, -1639, 612, -1642, 610, -540, 610, -541, 609, -1641, 610, -1639, 612, -540, 610, -1639, 612, -540, 610, -540, 610, -1639, 612, -1640, 611, -540, 610, -541, 609, -1641, 610, -540, 611, -1639, 611 ]
+
+  - platform: template
+    id: irbtn_blue
+    name: "${devicename} Preset Blue"
+    icon: "mdi:circle"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8993, -4442, 640, -513, 609, -541, 608, -1640, 611, -541, 609, -565, 585, -541, 608, -541, 609, -565, 585, -1639, 611, -1641, 610, -542, 608, -1641, 610, -1640, 611, -1639, 612, -1641, 611, -1639, 612, -1638, 613, -542, 608, -1639, 612, -541, 609, -541, 609, -541, 609, -1639, 612, -541, 609, -540, 610, -1640, 611, -541, 613, -1636, 611, -1640, 611, -1640, 611, -541, 609, -1638, 613 ]
+
+# Color Adjustment
+  - platform: template
+    id: irbtn_red_up
+    name: "${devicename} Adj. Red Up"
+    icon: "mdi:arrow-up-drop-circle"
+    on_press:
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8991, -4443, 611, -542, 608, -542, 608, -1639, 611, -542, 608, -541, 609, -541, 609, -541, 609, -541, 608, -1640, 611, -1639, 612, -541, 609, -1640, 611, -1639, 611, -1641, 610, -1640, 611, -1640, 612, -540, 610, -540, 610, -1639, 611, -541, 610, -1640, 610, -541, 610, -1638, 612, -541, 610, -1639, 611, -1642, 610, -540, 610, -1639, 611, -541, 610, -1639, 612, -540, 610, -1640, 611 ]
+
+  - platform: template
+    id: irbtn_red_down
+    name: "${devicename} Adj. Red Down"
+    icon: "mdi:arrow-down-drop-circle"
+    on_press:
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8995, -4443, 612, -541, 609, -541, 609, -1639, 612, -541, 609, -541, 609, -541, 609, -541, 609, -541, 608, -1640, 611, -1639, 612, -542, 608, -1640, 611, -1639, 612, -1639, 612, -1640, 611, -1640, 611, -541, 610, -540, 609, -541, 610, -540, 609, -1640, 611, -541, 610, -1640, 611, -540, 610, -1640, 610, -1641, 611, -1639, 612, -1640, 610, -541, 610, -1639, 612, -541, 609, -1641, 610 ]
+
+  - platform: template
+    id: irbtn_green_up
+    name: "${devicename} Adj. Green Up"
+    icon: "mdi:arrow-up-drop-circle"
+    on_press:
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8994, -4443, 612, -541, 609, -541, 609, -1640, 611, -541, 609, -541, 609, -541, 609, -540, 609, -541, 609, -1640, 612, -1639, 612, -540, 610, -1640, 611, -1640, 611, -1640, 611, -1640, 611, -1640, 611, -1639, 612, -541, 609, -1639, 612, -541, 610, -1640, 610, -541, 610, -1640, 610, -541, 609, -541, 609, -1639, 612, -541, 609, -1641, 610, -541, 609, -1641, 610, -541, 610, -1639, 611 ]
+
+  - platform: template
+    id: irbtn_green_down
+    name: "${devicename} Adj. Green Down"
+    icon: "mdi:arrow-down-drop-circle"
+    on_press:
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8992, -4443, 612, -541, 609, -541, 608, -1639, 612, -541, 609, -541, 609, -541, 608, -541, 609, -541, 609, -1639, 611, -1642, 609, -541, 609, -1640, 610, -1640, 611, -1641, 610, -1641, 610, -1639, 612, -1640, 611, -540, 610, -540, 609, -541, 609, -1639, 612, -540, 610, -1639, 611, -541, 609, -540, 610, -1639, 611, -1639, 612, -1639, 612, -540, 610, -1640, 611, -540, 610, -1640, 610 ]
+
+  - platform: template
+    id: irbtn_blue_up
+    name: "${devicename} Adj. Blue Up"
+    icon: "mdi:arrow-up-drop-circle"
+    on_press:
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8994, -4443, 611, -542, 608, -541, 609, -1639, 611, -542, 609, -541, 609, -541, 608, -541, 609, -541, 609, -1639, 611, -1640, 611, -541, 609, -1639, 612, -1639, 611, -1640, 611, -1640, 611, -1639, 612, -1640, 610, -541, 610, -540, 609, -1639, 612, -540, 610, -540, 610, -1639, 611, -541, 609, -541, 609, -1640, 611, -1639, 612, -540, 610, -1639, 611, -1641, 610, -541, 609, -1640, 611 ]
+
+  - platform: template
+    id: irbtn_blue_down
+    name: "${devicename} Adj. Blue Down"
+    icon: "mdi:arrow-down-drop-circle"
+    on_press:
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8993, -4443, 612, -541, 608, -542, 609, -1639, 611, -541, 609, -542, 608, -541, 609, -541, 609, -541, 609, -1640, 611, -1640, 611, -541, 609, -1640, 611, -1639, 612, -1639, 612, -1640, 611, -1640, 611, -1640, 611, -541, 609, -1640, 611, -1639, 612, -541, 610, -540, 610, -1641, 610, -541, 609, -540, 610, -1639, 612, -541, 609, -540, 610, -1641, 610, -1639, 612, -540, 610, -1639, 611 ]
+
+  - platform: template
+    id: irbtn_black_up
+    name: "${devicename} Adj. Black Up"
+    icon: "mdi:arrow-up-drop-circle"
+    on_press:
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8993, -4441, 612, -542, 609, -541, 608, -1640, 611, -541, 609, -541, 608, -542, 608, -541, 609, -541, 608, -1640, 611, -1639, 612, -541, 609, -1640, 611, -1638, 612, -1639, 612, -1640, 611, -1640, 611, -540, 609, -541, 609, -541, 609, -1639, 611, -541, 609, -541, 609, -1640, 611, -541, 609, -1639, 612, -1640, 611, -1640, 611, -540, 610, -1639, 611, -1640, 612, -540, 610, -1638, 612 ]
+
+  - platform: template
+    id: irbtn_black_down
+    name: "${devicename} Adj. Black Down"
+    icon: "mdi:arrow-down-drop-circle"
+    on_press:
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8993, -4442, 611, -541, 609, -541, 609, -1639, 611, -541, 609, -541, 609, -541, 609, -541, 609, -540, 609, -1641, 610, -1641, 610, -541, 609, -1641, 609, -1639, 612, -1639, 612, -1641, 610, -1640, 611, -541, 610, -540, 610, -1639, 611, -1641, 610, -541, 610, -540, 610, -1640, 610, -541, 609, -1640, 611, -1640, 611, -540, 610, -540, 610, -1640, 611, -1639, 613, -540, 609, -1640, 611 ]
+
+# Memory Presets
+  - platform: template
+    id: irbtn_memory1
+    name: "${devicename} Memory 1"
+    icon: "mdi:numeric-1-box-multiple"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8992, -4441, 613, -541, 609, -540, 609, -1639, 612, -541, 609, -541, 609, -540, 610, -540, 609, -541, 609, -1640, 611, -1641, 609, -541, 610, -1640, 610, -1640, 611, -1640, 611, -1638, 613, -1639, 612, -540, 610, -540, 610, -1639, 611, -1640, 611, -1639, 612, -540, 610, -540, 610, -540, 610, -1638, 613, -1639, 612, -540, 610, -539, 610, -541, 610, -1638, 612, -1640, 611, -1640, 612 ]
+
+  - platform: template
+    id: irbtn_memory2
+    name: "${devicename} Memory 2"
+    icon: "mdi:numeric-2-box-multiple"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8993, -4442, 611, -541, 609, -541, 609, -1638, 612, -541, 609, -541, 608, -542, 608, -542, 608, -541, 609, -1638, 612, -1638, 613, -541, 609, -1638, 612, -1638, 613, -1639, 612, -1638, 612, -1640, 611, -1641, 610, -540, 610, -1639, 611, -1640, 611, -1640, 611, -541, 609, -540, 610, -541, 609, -540, 610, -1639, 612, -540, 609, -541, 609, -540, 610, -1639, 611, -1641, 610, -1639, 612 ]
+
+  - platform: template
+    id: irbtn_memory3
+    name: "${devicename} Memory 3"
+    icon: "mdi:numeric-3-box-multiple"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8992, -4443, 611, -541, 609, -540, 609, -1640, 611, -541, 609, -540, 610, -541, 609, -541, 609, -540, 609, -1639, 612, -1641, 610, -541, 609, -1639, 612, -1639, 612, -1640, 611, -1639, 612, -1639, 612, -540, 610, -1639, 612, -1639, 612, -1639, 612, -1640, 611, -540, 610, -540, 610, -540, 610, -1638, 613, -539, 611, -540, 610, -540, 610, -540, 610, -1640, 611, -1638, 613, -1639, 612 ]
+
+  - platform: template
+    id: irbtn_memory4
+    name: "${devicename} Memory 4"
+    icon: "mdi:numeric-4-box-multiple"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8970, -4467, 637, -540, 609, -518, 632, -1615, 635, -518, 634, -540, 610, -540, 609, -518, 633, -516, 632, -1616, 609, -1641, 637, -517, 634, -1614, 638, -1613, 637, -1614, 639, -1612, 637, -1616, 636, -1616, 636, -1612, 639, -1612, 639, -1614, 639, -1612, 638, -515, 636, -514, 636, -514, 636, -514, 636, -515, 636, -514, 636, -514, 636, -514, 637, -1613, 610, -1639, 612, -1640, 612 ]
+
+# Moon Presets
+  - platform: template
+    id: irbtn_moonlight1
+    name: "${devicename} Moonlight 1"
+    icon: "mdi:moon-waning-crescent"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8994, -4416, 611, -542, 636, -514, 637, -1610, 612, -541, 609, -541, 609, -541, 609, -541, 609, -541, 609, -1639, 611, -1640, 611, -541, 609, -1638, 613, -1638, 612, -1640, 611, -1640, 611, -1638, 612, -541, 609, -540, 610, -540, 610, -1640, 610, -1640, 611, -540, 610, -540, 610, -540, 609, -1641, 610, -1638, 612, -1640, 611, -540, 610, -540, 610, -1639, 611, -1639, 612, -1639, 611 ]
+
+  - platform: template
+    id: irbtn_moonlight2
+    name: "${devicename} Moonlight 2"
+    icon: "mdi:moon-waning-crescent"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8990, -4442, 610, -541, 609, -540, 610, -1639, 611, -540, 609, -541, 609, -540, 610, -540, 609, -540, 610, -1639, 611, -1639, 611, -540, 610, -1639, 611, -1639, 612, -1639, 611, -1640, 611, -1640, 610, -1639, 612, -541, 609, -539, 610, -1640, 611, -1639, 611, -540, 610, -540, 610, -540, 610, -539, 611, -1638, 612, -1639, 612, -540, 610, -539, 611, -1639, 611, -1639, 612, -1639, 612 ]
+
+  - platform: template
+    id: irbtn_moonlight3
+    name: "${devicename} Moonlight 3"
+    icon: "mdi:moon-waning-crescent"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8994, -4441, 612, -541, 609, -541, 608, -1640, 611, -541, 609, -541, 608, -541, 609, -541, 609, -541, 609, -1639, 611, -1638, 612, -542, 608, -1641, 610, -1639, 611, -1639, 612, -1640, 610, -1641, 610, -541, 612, -1636, 611, -541, 609, -1640, 611, -1640, 611, -540, 610, -539, 610, -540, 610, -1639, 611, -540, 610, -1638, 612, -540, 611, -539, 610, -1639, 611, -1639, 612, -1640, 611 ]
+
+  - platform: template
+    id: irbtn_dusk_dawn
+    name: "${devicename} Dusk/Dawn"
+    icon: "mdi:theme-light-dark"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 9020, -4414, 640, -514, 608, -542, 608, -1639, 612, -542, 608, -565, 585, -541, 609, -541, 609, -541, 609, -1639, 612, -1638, 612, -542, 608, -1641, 610, -1639, 613, -1640, 611, -1640, 611, -1642, 609, -1639, 612, -1640, 610, -541, 610, -1638, 612, -1640, 612, -541, 608, -541, 609, -541, 609, -541, 609, -541, 609, -1638, 612, -541, 610, -540, 610, -1639, 611, -1639, 612, -1639, 612 ]
+
+# Cloudy Presets
+  - platform: template
+    id: irbtn_cloudy1
+    name: "${devicename} Cloudy 1"
+    icon: "mdi:weather-partly-cloudy"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8991, -4443, 610, -542, 608, -541, 608, -1639, 611, -542, 608, -541, 609, -541, 608, -541, 609, -541, 608, -1640, 611, -1639, 611, -541, 609, -1639, 611, -1640, 611, -1638, 612, -1640, 611, -1639, 611, -541, 609, -540, 609, -1640, 611, -540, 609, -1638, 612, -541, 609, -541, 609, -541, 609, -1639, 611, -1639, 612, -539, 610, -1641, 609, -540, 610, -1640, 610, -1641, 610, -1639, 611 ]
+
+  - platform: template
+    id: irbtn_cloudy2
+    name: "${devicename} Cloudy 2"
+    icon: "mdi:weather-partly-cloudy"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8993, -4442, 611, -542, 608, -542, 608, -1639, 612, -541, 609, -541, 608, -542, 608, -541, 608, -542, 608, -1640, 610, -1640, 611, -541, 608, -1639, 612, -1640, 610, -1639, 612, -1640, 611, -1638, 612, -1640, 611, -541, 609, -1640, 610, -541, 609, -1639, 611, -541, 609, -541, 608, -542, 607, -542, 608, -1639, 611, -541, 609, -1640, 610, -541, 609, -1638, 611, -1640, 611, -1638, 612 ]
+
+  - platform: template
+    id: irbtn_cloudy3
+    name: "${devicename} Cloudy 3"
+    icon: "mdi:weather-partly-cloudy"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8994, -4443, 611, -542, 608, -542, 608, -1640, 610, -542, 608, -542, 608, -541, 608, -541, 609, -541, 610, -1639, 611, -1640, 611, -541, 609, -1639, 612, -1641, 610, -1639, 612, -1639, 612, -1640, 610, -542, 608, -1640, 611, -1641, 609, -541, 609, -1640, 610, -541, 609, -540, 609, -540, 609, -1639, 611, -541, 609, -540, 609, -1639, 611, -540, 609, -1638, 612, -1638, 612, -1638, 611 ]
+
+  - platform: template
+    id: irbtn_cloudy4
+    name: "${devicename} Cloudy 4"
+    icon: "mdi:weather-partly-cloudy"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8993, -4441, 611, -541, 609, -541, 608, -1638, 612, -542, 608, -541, 608, -541, 609, -540, 609, -541, 608, -1639, 611, -1639, 611, -541, 609, -1638, 612, -1639, 611, -1640, 610, -1639, 611, -1640, 611, -1640, 609, -1639, 612, -1639, 611, -540, 609, -1640, 610, -540, 609, -541, 609, -540, 609, -540, 610, -540, 609, -541, 608, -1639, 611, -541, 609, -1639, 611, -1638, 612, -1639, 611 ]
+
+# Storm Presets
+  - platform: template
+    id: irbtn_storm1
+    name: "${devicename} Storm 1"
+    icon: "mdi:weather-lightning-rainy"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8993, -4441, 611, -541, 608, -541, 608, -1639, 610, -541, 608, -541, 609, -541, 608, -541, 608, -541, 608, -1639, 611, -1640, 611, -540, 609, -1639, 610, -1640, 609, -1639, 611, -1639, 612, -1638, 611, -541, 608, -541, 609, -541, 608, -540, 609, -1639, 611, -540, 609, -541, 609, -540, 610, -1638, 613, -1639, 611, -1640, 612, -1639, 612, -541, 609, -1640, 611, -1641, 611, -1640, 611 ]
+
+  - platform: template
+    id: irbtn_storm2
+    name: "${devicename} Storm 2"
+    icon: "mdi:weather-lightning-rainy"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8994, -4442, 612, -566, 584, -542, 608, -1638, 611, -541, 609, -541, 608, -541, 609, -565, 584, -565, 585, -1639, 611, -1639, 610, -542, 608, -1638, 611, -1638, 612, -1640, 610, -1639, 612, -1639, 611, -1640, 610, -541, 609, -541, 609, -540, 610, -1639, 611, -540, 609, -540, 610, -540, 608, -541, 609, -1639, 611, -1639, 611, -1640, 611, -540, 610, -1638, 611, -1638, 613, -1640, 610 ]
+
+  - platform: template
+    id: irbtn_storm3
+    name: "${devicename} Storm 3"
+    icon: "mdi:weather-lightning-rainy"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8992, -4442, 611, -541, 609, -540, 610, -1638, 612, -541, 609, -540, 610, -540, 609, -541, 609, -541, 609, -1640, 610, -1639, 612, -541, 609, -1640, 610, -1640, 611, -1640, 611, -1640, 611, -1639, 611, -541, 609, -1640, 611, -541, 609, -541, 609, -1640, 611, -540, 610, -540, 610, -541, 609, -1640, 610, -541, 610, -1641, 609, -1640, 611, -540, 610, -1640, 611, -1640, 611, -1640, 611 ]
+
+  - platform: template
+    id: irbtn_storm4
+    name: "${devicename} Storm 4"
+    icon: "mdi:weather-lightning-rainy"
+    on_press:
+      - script.execute: power_on
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8991, -4443, 610, -542, 608, -542, 608, -1640, 610, -542, 608, -541, 609, -541, 609, -541, 608, -542, 608, -1640, 610, -1640, 611, -540, 610, -1639, 611, -1641, 610, -1641, 609, -1641, 610, -1639, 611, -1640, 611, -1639, 612, -540, 610, -541, 609, -1637, 613, -542, 608, -541, 609, -541, 609, -541, 609, -541, 609, -1639, 612, -1640, 610, -541, 609, -1641, 610, -1640, 611, -1640, 611 ]
+
+# This IR Command was sent by the remote when holding any button
+  - platform: template
+    id: irbtn_repeat
+    name: "${devicename} Repeat"
+    icon: "mdi:repeat"
+    on_press:
+      - remote_transmitter.transmit_raw:
+          carrier_frequency: 38kHz
+          code: [ 8970, -2235, 587 ]
+
+select:
+  - platform: template
+    name: "${devicename} Select Button"
+    id: "select_irbtn"
+    optimistic: true
+    options:
+      - "- select -"
+      - "Power On/Off"
+      - "Preset Orange"
+      - "Preset Teal"
+      - "Preset Purple"
+      - "Preset White"
+      - "Preset Yellow"
+      - "Preset Blue"
+      - "Memory 1"
+      - "Memory 2"
+      - "Memory 3"
+      - "Memory 4"
+      - "Moonlight 1"
+      - "Moonlight 2"
+      - "Moonlight 3"
+      - "Dusk/Dawn"
+      - "Cloudy 1"
+      - "Cloudy 2"
+      - "Cloudy 3"
+      - "Cloudy 4"
+      - "Storm 1"
+      - "Storm 2"
+      - "Storm 3"
+      - "Storm 4"
+    initial_option: "- select -"
+    on_value:
+      then:
+        - logger.log:
+            format: "Selected: %s"
+            args: ["x.c_str()"]
+
+        - if:
+            condition:
+              # If the selected item is "one" then push the equivalent button
+              - lambda: return !( 0 != strcmp(x.c_str(), "Power On/Off") );
+              # strcmp retuns 0 when the strings are equal and some Integer when
+              # they do not match.  A return from strcmp that does NOT equal 0
+              # means the strings do NOT match, but the != comparison returns
+              # TRUE (ex: 0!=2).  A return from strcmp that DOES equal 0 means
+              # the strings DO match, but the ~= comparison returns FALSE (0!=0)
+              # So NOT'ing the result of the comparison to 0 returns TRUE
+              # only when the strings DO match, and the Condition will execute
+              # the actions in THEN.
+            then:
+              button.press: irbtn_onoff
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Preset Orange") );
+            then:
+              button.press: irbtn_orange
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Preset Teal") );
+            then:
+              button.press: irbtn_teal
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Preset Purple") );
+            then:
+              button.press: irbtn_purple
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Preset White") );
+            then:
+              button.press: irbtn_white
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Preset Yellow") );
+            then:
+              button.press: irbtn_yellow
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Preset Blue") );
+            then:
+              button.press: irbtn_blue
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Memory 1") );
+            then:
+              button.press: irbtn_memory1
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Memory 2") );
+            then:
+              button.press: irbtn_memory2
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Memory 3") );
+            then:
+              button.press: irbtn_memory3
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Memory 4") );
+            then:
+              button.press: irbtn_memory4
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Moonlight 1") );
+            then:
+              button.press: irbtn_moonlight1
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Moonlight 2") );
+            then:
+              button.press: irbtn_moonlight2
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Moonlight 3") );
+            then:
+              button.press: irbtn_moonlight3
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Dusk/Dawn") );
+            then:
+              button.press: irbtn_dusk_dawn
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Cloudy 1") );
+            then:
+              button.press: irbtn_cloudy1
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Cloudy 2") );
+            then:
+              button.press: irbtn_cloudy2
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Cloudy 3") );
+            then:
+              button.press: irbtn_cloudy3
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Cloudy 4") );
+            then:
+              button.press: irbtn_cloudy4
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Storm 1") );
+            then:
+              button.press: irbtn_storm1
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Storm 2") );
+            then:
+              button.press: irbtn_storm2
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Storm 3") );
+            then:
+              button.press: irbtn_storm3
+        - if:
+            condition:
+              - lambda: return !( 0 != strcmp(x.c_str(), "Storm 4") );
+            then:
+              button.press: irbtn_storm4
+#        - logger.log: ...
